@@ -69,9 +69,10 @@ MODEL_OPTIONS = [
 
 DEFAULT_SEARCH_CONTEXT_SIZE = "low"  # reduce token usage by default
 DEFAULT_MAX_TOOL_CALLS = 1
-MAX_OUTPUT_TOKENS = 800  # keep responses compact
+MAX_OUTPUT_TOKENS = 4000  # leave room for reasoning
+REASONING_EFFORT = 'low'
 # Max characters of the visible answer we print. Set to 0 or negative to disable truncation.
-MAX_ANSWER_CHARS = 800
+MAX_ANSWER_CHARS = 1800
 SAVE_FULL_RESPONSES = True
 LOG_DIR = "logs"
 
@@ -371,14 +372,19 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
     # Optionally provide a coarse location if desired
     # tools[0]["user_location"] = {"type": "approximate", "country": "US", "city": "Los Angeles", "region": "CA", "timezone": "America/Los_Angeles"}
 
-    resp = client.responses.create(
-        model=model,
-        input=[system_msg, user_msg],
-        tools=tools,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
-        max_tool_calls=max_tool_calls,
-        parallel_tool_calls=False,
-    )
+    # Build request with conditional reasoning effort (supported on GPT-5 family only)
+    req_kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": [system_msg, user_msg],
+        "tools": tools,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_tool_calls": max_tool_calls,
+        "parallel_tool_calls": False,
+    }
+    if str(model).startswith("gpt-5") and REASONING_EFFORT:
+        req_kwargs["reasoning"] = {"effort": REASONING_EFFORT}
+
+    resp = client.responses.create(**req_kwargs)
 
     # Safety check: log what the server reports back and compute billable vs attempted calls
     total_found = 0
@@ -621,7 +627,34 @@ def main() -> None:
                 title = c.get("title")
                 label = f"{title} - {url}" if title else (url or "")
                 print(f"    {i}. {label}")
+        # Token cost and breakdown
         print(f"  Token cost: ${info['token_cost_usd']:.6f}")
+        try:
+            usage_dbg = info.get("usage") or {}
+            pricing_dbg = TOKEN_PRICING_PER_MILLION.get(info.get("model"), {}) or {}
+            in_price = float(pricing_dbg.get("inputTokens", 0.0))
+            read_price = float(pricing_dbg.get("inputReadCache", in_price))
+            out_price = float(pricing_dbg.get("outputTokens", 0.0))
+            in_tokens = int((usage_dbg.get("input_tokens") or 0) or 0)
+            cached_tokens = int(((usage_dbg.get("input_tokens_details") or {}).get("cached_tokens") or 0) or 0)
+            uncached_tokens = max(in_tokens - cached_tokens, 0)
+            out_tokens = int((usage_dbg.get("output_tokens") or 0) or 0)
+            cost_uncached = (uncached_tokens * in_price) / 1_000_000.0
+            cost_cached = (cached_tokens * read_price) / 1_000_000.0
+            cost_output = (out_tokens * out_price) / 1_000_000.0
+            # Variable-formula line
+            print("  Token cost formula: ((uncached_input_tokens × inputPrice) + (cached_input_tokens × cachedPrice) + (output_tokens × outputPrice)) / 1,000,000")
+            print("  Where: uncached_input_tokens = input_tokens − cached_tokens")
+            # Numeric substitution line
+            print(
+                f"  = (({uncached_tokens} × {in_price}) + ({cached_tokens} × {read_price}) + ({out_tokens} × {out_price})) / 1,000,000"
+            )
+            # Component totals and final
+            print(
+                f"  = (${cost_uncached:.6f} + ${cost_cached:.6f} + ${cost_output:.6f}) = ${info['token_cost_usd']:.6f}"
+            )
+        except Exception:
+            pass
         print(f"  Web search surcharge: ${info['web_search_cost_usd']:.6f}")
         print(f"  Total estimated cost: ${info['total_cost_usd']:.6f}")
         # Inform about saved log path if logging is enabled

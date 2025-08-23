@@ -10,6 +10,9 @@ __pycache__/
 .env
 .env.*
 
+# Keep the example env checked in
+!.env.example
+
 # OS files
 .DS_Store
 Thumbs.db

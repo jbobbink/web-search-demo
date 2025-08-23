@@ -42,7 +42,6 @@ except Exception as e:
 
 # ---- Configuration ----
 # Per 1M tokens pricing (USD) for the selected models
-# Note: these mirror the values in backend/config/model-settings.json for the 4 models we use here
 TOKEN_PRICING_PER_MILLION = {
     "gpt-5": {"inputTokens": 1.25, "inputReadCache": 0.1250, "outputTokens": 10.00},
     "gpt-5-mini": {"inputTokens": 0.25, "inputReadCache": 0.025, "outputTokens": 2.00},
@@ -70,6 +69,8 @@ MODEL_OPTIONS = [
 DEFAULT_SEARCH_CONTEXT_SIZE = "low"  # reduce token usage by default
 DEFAULT_MAX_TOOL_CALLS = 1
 MAX_OUTPUT_TOKENS = 800  # keep responses compact
+# Max characters of the visible answer we print. Set to 0 or negative to disable truncation.
+MAX_ANSWER_CHARS = 800
 
 
 def count_web_search_calls(resp: Any) -> Tuple[int, List[Dict[str, Any]]]:
@@ -161,6 +162,70 @@ def usage_to_dict(resp: Any) -> Dict[str, Any]:
         return {}
 
 
+def extract_url_citations(resp: Any) -> List[Dict[str, Any]]:
+    """Best-effort extraction of web citations from a Responses API result.
+
+    Returns a list of {url, title?} dicts, de-duplicated by URL.
+    Handles both annotation-style citations and web_search_tool_result content.
+    """
+    def sget(obj, name, default=None):
+        if hasattr(obj, name):
+            try:
+                return getattr(obj, name)
+            except Exception:
+                return default
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return default
+
+    cites: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    try:
+        output = sget(resp, "output", []) or []
+        for item in output:
+            # 1) Look for annotations on the item itself
+            anns = sget(item, "annotations", []) or []
+            for a in anns:
+                atype = sget(a, "type")
+                url = sget(a, "url")
+                title = sget(a, "title")
+                if url and (atype in ("url_citation", "url-citation", None)):
+                    if url not in seen:
+                        cites.append({"url": url, **({"title": title} if title else {})})
+                        seen.add(url)
+
+            # 2) Look inside message content blocks
+            content = sget(item, "content", []) or []
+            for c in content:
+                # Annotations on content items
+                cann = sget(c, "annotations", []) or []
+                for a in cann:
+                    atype = sget(a, "type")
+                    url = sget(a, "url")
+                    title = sget(a, "title")
+                    if url and (atype in ("url_citation", "url-citation", None)):
+                        if url not in seen:
+                            cites.append({"url": url, **({"title": title} if title else {})})
+                            seen.add(url)
+
+                # web_search_tool_result with web_search_result items
+                ctype = sget(c, "type")
+                if ctype in ("web_search_tool_result", "web_search_result", "tool_result"):
+                    # try content list (may contain results)
+                    ccontent = sget(c, "content", []) or []
+                    for r in ccontent:
+                        rurl = sget(r, "url")
+                        rtitle = sget(r, "title")
+                        if rurl and rurl not in seen:
+                            cites.append({"url": rurl, **({"title": rtitle} if rtitle else {})})
+                            seen.add(rurl)
+    except Exception:
+        pass
+
+    return cites
+
+
 def compute_token_cost(model: str, usage: Dict[str, Any]) -> float:
     """Compute token costs using per-1M pricing.
 
@@ -228,6 +293,7 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
     usage = usage_to_dict(resp)
     calls, details = count_web_search_calls(resp)
     text = extract_text(resp)
+    citations = extract_url_citations(resp)
 
     token_cost = compute_token_cost(model, usage)
     search_cost = web_search_call_cost(model, calls)
@@ -239,6 +305,7 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
         "usage": usage,
         "web_search_calls": calls,
         "web_search_details": details,
+        "citations": citations,
         "token_cost_usd": token_cost,
         "web_search_cost_usd": search_cost,
         "total_cost_usd": total_cost,
@@ -250,15 +317,17 @@ def choose_models() -> List[str]:
     for idx, (name, label) in enumerate(MODEL_OPTIONS, start=1):
         print(f"  {idx}. {label} ({name})")
     print("  5. All of the above")
+    print("You can select:")
+    print("  - A single number (1-4)")
+    print("  - Comma-separated numbers or model names (e.g., 1,3 or gpt-5,gpt-4.1-mini)")
+    print("  - 5 for All")
 
     while True:
-        sel = input("Enter a number (1-5): ").strip()
-        if sel in {"1", "2", "3", "4"}:
-            idx = int(sel) - 1
-            return [MODEL_OPTIONS[idx][0]]
-        if sel == "5":
-            return [m for m, _ in MODEL_OPTIONS]
-        print("Please enter a valid option (1-5).")
+        sel = input("Enter selection (e.g., 1 or 1,3 or gpt-5,gpt-4.1-mini, or 5 for All): ").strip()
+        models = parse_models_arg(sel)
+        if models:
+            return models
+        print("Please enter a valid selection (single number, comma-separated numbers/names, or 5 for All).")
 
 
 def prompt_int(prompt: str, default: int) -> int:
@@ -399,10 +468,19 @@ def main() -> None:
         print(f"  Usage (raw): {json.dumps(info['usage'], indent=2)}")
         if info["answer"]:
             ans = info["answer"].strip()
-            if len(ans) > 800:
-                ans = ans[:800] + "..."
+            if MAX_ANSWER_CHARS and MAX_ANSWER_CHARS > 0 and len(ans) > MAX_ANSWER_CHARS:
+                ans = ans[:MAX_ANSWER_CHARS] + "..."
             print("  Answer:")
             print("  " + "\n  ".join(ans.splitlines()))
+        # Print citations if present
+        cites = info.get("citations") or []
+        if cites:
+            print("  Citations:")
+            for i, c in enumerate(cites, 1):
+                url = c.get("url")
+                title = c.get("title")
+                label = f"{title} - {url}" if title else (url or "")
+                print(f"    {i}. {label}")
         print(f"  Token cost: ${info['token_cost_usd']:.6f}")
         print(f"  Web search surcharge: ${info['web_search_cost_usd']:.6f}")
         print(f"  Total estimated cost: ${info['total_cost_usd']:.6f}")

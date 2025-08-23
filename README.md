@@ -38,21 +38,21 @@ This demo makes the difference visible in one run.
 
 - macOS / Linux
   ```bash
-  cd openai-web-search-demo
+  cd web-search-demo
   python3 -m venv .venv
   source .venv/bin/activate
   ```
 
 - Windows (PowerShell)
   ```powershell
-  cd openai-web-search-demo
+  cd web-search-demo
   py -m venv .venv
   .\.venv\Scripts\Activate.ps1
   ```
 
 - Windows (cmd)
   ```bat
-  cd openai-web-search-demo
+  cd web-search-demo
   py -m venv .venv
   .\.venv\Scripts\activate.bat
   ```
@@ -100,10 +100,12 @@ Flags
 
 Output
 - Per model: number of web calls, raw usage dict, token cost, web search surcharge, total
+- Citations list (URLs and titles when available)
 - Final table with per-model summary
 
 Notes
 - The script passes `max_tool_calls` to the Responses API (enforced) and sets `web_search_preview` with `search_context_size` (low/medium/high).
+- You can change the default visible answer length by editing the constant `MAX_ANSWER_CHARS` in `web_search_cost_demo.py` (set to 0 or negative to disable truncation). `MAX_OUTPUT_TOKENS` controls the model's maximum output tokens.
 - GPT-5 family can accumulate more input tokens because the content retrieved from the web search is billed at input token rates in addition to the per-call surcharge, while in the 4.1 family the search content tokens are included.
 
 ## License

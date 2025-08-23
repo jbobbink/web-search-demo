@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import argparse
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 try:
@@ -71,6 +72,8 @@ DEFAULT_MAX_TOOL_CALLS = 1
 MAX_OUTPUT_TOKENS = 800  # keep responses compact
 # Max characters of the visible answer we print. Set to 0 or negative to disable truncation.
 MAX_ANSWER_CHARS = 800
+SAVE_FULL_RESPONSES = True
+LOG_DIR = "logs"
 
 
 def count_web_search_calls(resp: Any) -> Tuple[int, List[Dict[str, Any]]]:
@@ -232,6 +235,84 @@ def extract_url_citations(resp: Any) -> List[Dict[str, Any]]:
     return cites
 
 
+def _safe_serialize(obj: Any) -> Any:
+    """Best-effort conversion of SDK objects to JSON-serializable structures."""
+    try:
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, list):
+            return [_safe_serialize(x) for x in obj]
+        if isinstance(obj, tuple):
+            return [_safe_serialize(x) for x in obj]
+        if isinstance(obj, dict):
+            return {str(k): _safe_serialize(v) for k, v in obj.items()}
+        # pydantic-like
+        if hasattr(obj, "model_dump"):
+            try:
+                return _safe_serialize(obj.model_dump())
+            except Exception:
+                pass
+        if hasattr(obj, "model_dump_json"):
+            try:
+                import json as _json
+                return _json.loads(obj.model_dump_json())
+            except Exception:
+                pass
+        # generic object
+        if hasattr(obj, "__dict__"):
+            try:
+                return {k: _safe_serialize(v) for k, v in vars(obj).items() if not k.startswith("_")}
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # fallback
+    try:
+        return str(obj)
+    except Exception:
+        return None
+
+
+def write_response_log(
+    model: str,
+    query: str,
+    max_tool_calls: int,
+    search_context_size: str,
+    resp: Any,
+    usage: Dict[str, Any],
+    counted_calls: int,
+    call_details: List[Dict[str, Any]],
+    citations: List[Dict[str, Any]],
+) -> str:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%fZ")
+    model_tag = (model or "model").replace("/", "-").replace(":", "-")
+    filename = f"{ts}_{model_tag}.json"
+    path = os.path.join(LOG_DIR, filename)
+    payload = {
+        "timestamp_utc": ts,
+        "request": {
+            "model": model,
+            "query": query,
+            "max_tool_calls": max_tool_calls,
+            "search_context_size": search_context_size,
+        },
+        "usage": usage,
+        "web_search": {
+            "counted_calls": counted_calls,
+            "details": call_details,
+        },
+        "citations": citations,
+        "raw_response": _safe_serialize(resp),
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"  [debug] failed to write log {path}: {e}")
+    return path
+
+
 def compute_token_cost(model: str, usage: Dict[str, Any]) -> float:
     """Compute token costs using per-1M pricing.
 
@@ -292,19 +373,21 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
         tools=tools,
         max_output_tokens=MAX_OUTPUT_TOKENS,
         max_tool_calls=max_tool_calls,
+        parallel_tool_calls=False,
     )
 
     # Safety check: log what the server reports back for usage and any web_search_call items
     try:
-        debug_summary = {
-            "requested_max_tool_calls": max_tool_calls,
-            "counted_web_search_calls": None,
-            "response_has_usage": bool(getattr(resp, "usage", None)),
-        }
-        # quick parse again here for logging
+        resp_mtc = getattr(resp, "max_tool_calls", None)
+        # Sometimes nested under raw serialized content; fallback attempt
+        if resp_mtc is None and hasattr(resp, "model_dump"):
+            try:
+                md = resp.model_dump()
+                resp_mtc = md.get("max_tool_calls")
+            except Exception:
+                pass
         c, _ = count_web_search_calls(resp)
-        debug_summary["counted_web_search_calls"] = c
-        print(f"  [debug] tool-calls: requested={max_tool_calls} counted={c}")
+        print(f"  [debug] tool-calls: requested={max_tool_calls} response.max_tool_calls={resp_mtc} counted={c}")
     except Exception:
         pass
 
@@ -312,6 +395,24 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
     calls, details = count_web_search_calls(resp)
     text = extract_text(resp)
     citations = extract_url_citations(resp)
+
+    # Optionally save a full response log for analysis
+    log_path = None
+    if SAVE_FULL_RESPONSES:
+        try:
+            log_path = write_response_log(
+                model=model,
+                query=query,
+                max_tool_calls=max_tool_calls,
+                search_context_size=search_context_size,
+                resp=resp,
+                usage=usage,
+                counted_calls=calls,
+                call_details=details,
+                citations=citations,
+            )
+        except Exception as e:
+            print(f"  [debug] failed to serialize response: {e}")
 
     token_cost = compute_token_cost(model, usage)
     search_cost = web_search_call_cost(model, calls)
@@ -502,6 +603,9 @@ def main() -> None:
         print(f"  Token cost: ${info['token_cost_usd']:.6f}")
         print(f"  Web search surcharge: ${info['web_search_cost_usd']:.6f}")
         print(f"  Total estimated cost: ${info['total_cost_usd']:.6f}")
+        # Inform about saved log path if logging is enabled
+        if SAVE_FULL_RESPONSES:
+            print(f"  [debug] saved response log in {LOG_DIR}/ (per-model JSON)")
         print("")
 
     if not results:

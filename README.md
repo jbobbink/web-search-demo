@@ -104,7 +104,7 @@ Output
 - Final table with per-model summary
 
 Notes
-- The script passes `max_tool_calls` to the Responses API (enforced) and sets `web_search_preview` with `search_context_size` (low/medium/high).
+- The script passes `max_tool_calls` to the Responses API (enforced) and sets `web_search_preview` with `search_context_size` (low/medium/high). We also set `parallel_tool_calls=False` to reduce the chance of concurrent tool calls when a strict cap is desired.
 - You can change the default visible answer length by editing the constant `MAX_ANSWER_CHARS` in `web_search_cost_demo.py` (set to 0 or negative to disable truncation). `MAX_OUTPUT_TOKENS` controls the model's maximum output tokens.
 - GPT-5 family can accumulate more input tokens because the content retrieved from the web search is billed at input token rates in addition to the per-call surcharge, while in the 4.1 family the search content tokens are included.
 

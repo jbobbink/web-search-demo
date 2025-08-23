@@ -106,6 +106,7 @@ Output
 Notes
 - The script passes `max_tool_calls` to the Responses API (enforced) and sets `web_search_preview` with `search_context_size` (low/medium/high). We also set `parallel_tool_calls=False` to reduce the chance of concurrent tool calls when a strict cap is desired.
 - The Responses API may still show more than `max_tool_calls` web_search_call items in the output. Based on our tests and the OpenAI dashboard, only up to `max_tool_calls` are billed; extra attempts appear to be ignored by the service. Our cost calculator self-enforces the cap (counts only completed calls up to the limit) and logs the total attempted calls for transparency.
+- Caching note: Testing the same query repeatedly can result in cached web tokens that may not reflect real-world usage. We recommend testing with a new query each time and only repeating queries after at least an hour has passed (OpenAI’s estimated cache TTL).
 - You can change the default visible answer length by editing the constant `MAX_ANSWER_CHARS` in `web_search_cost_demo.py` (set to 0 or negative to disable truncation). `MAX_OUTPUT_TOKENS` controls the model's maximum output tokens.
 - GPT-5 family can accumulate more input tokens because the content retrieved from the web search is billed at input token rates in addition to the per-call surcharge, while in the 4.1 family the search content tokens are included.
 - Logs: each run writes a JSON file under `logs/` with the full serialized response, usage, citations, and both `counted_calls` (billable, capped) and `attempted_total` (raw events seen).

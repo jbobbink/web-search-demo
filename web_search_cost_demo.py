@@ -397,10 +397,11 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
         completed = [d for d in (details_all or []) if (d or {}).get("status") == "completed"]
         billable_count = min(len(completed), int(max_tool_calls or 0))
         ignored_attempts = max(0, total_found - billable_count)
-        print(
-            f"  [debug] tool-calls: requested={max_tool_calls} response.max_tool_calls={resp_mtc} "
-            f"counted={billable_count} ({ignored_attempts} additional tool call(s) attempted, assumed ignored according to documentation and not counting as billable)"
-        )
+        if ignored_attempts > 0:
+            print(
+                f"  [debug] tool-calls: requested={max_tool_calls} response.max_tool_calls={resp_mtc} "
+                f"counted={billable_count} ({ignored_attempts} additional tool call(s) attempted, assumed ignored according to documentation and not counting as billable)"
+            )
     except Exception:
         pass
 

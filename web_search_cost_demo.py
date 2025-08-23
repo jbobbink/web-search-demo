@@ -92,14 +92,15 @@ def count_web_search_calls(resp: Any) -> Tuple[int, List[Dict[str, Any]]]:
         for item in output:
             item_type = getattr(item, "type", None)
             if item_type == "web_search_call":
-                # Try to extract unique key and query
+                # Try to extract unique key and attributes
                 iid = getattr(item, "id", None)
                 act = getattr(item, "action", None)
                 q = getattr(act, "query", None) if act else None
+                status = getattr(item, "status", None)
                 key = ("web_search_call", iid) if iid else ("web_search_call", (q or "").strip().lower())
                 if key not in seen_keys:
                     seen_keys.add(key)
-                    details.append({"type": "web_search_call", "id": iid, "query": q})
+                    details.append({"type": "web_search_call", "id": iid, "query": q, "status": status})
             # Sometimes web search calls might appear as provider_tool_call blocks in adapters,
             # but in raw SDK Responses it should be 'web_search_call'. Keeping just in case:
             if item_type == "provider_tool_call":
@@ -108,10 +109,11 @@ def count_web_search_calls(resp: Any) -> Tuple[int, List[Dict[str, Any]]]:
                     iid = getattr(item, "id", None)
                     act = getattr(item, "action", None)
                     q = getattr(act, "query", None) if act else None
+                    status = getattr(item, "status", None)
                     key = ("web_search_call", iid) if iid else ("web_search_call", (q or "").strip().lower())
                     if key not in seen_keys:
                         seen_keys.add(key)
-                        details.append({"type": "web_search_call", "id": iid, "query": q})
+                        details.append({"type": "web_search_call", "id": iid, "query": q, "status": status})
     except Exception:
         pass
 
@@ -283,6 +285,7 @@ def write_response_log(
     counted_calls: int,
     call_details: List[Dict[str, Any]],
     citations: List[Dict[str, Any]],
+    attempted_total: int = None,
 ) -> str:
     os.makedirs(LOG_DIR, exist_ok=True)
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%fZ")
@@ -300,6 +303,7 @@ def write_response_log(
         "usage": usage,
         "web_search": {
             "counted_calls": counted_calls,
+            "attempted_total": attempted_total,
             "details": call_details,
         },
         "citations": citations,
@@ -376,23 +380,37 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
         parallel_tool_calls=False,
     )
 
-    # Safety check: log what the server reports back for usage and any web_search_call items
+    # Safety check: log what the server reports back and compute billable vs attempted calls
+    total_found = 0
+    details_all: List[Dict[str, Any]] = []
+    billable_count = 0
+    ignored_attempts = 0
     try:
         resp_mtc = getattr(resp, "max_tool_calls", None)
-        # Sometimes nested under raw serialized content; fallback attempt
         if resp_mtc is None and hasattr(resp, "model_dump"):
             try:
                 md = resp.model_dump()
                 resp_mtc = md.get("max_tool_calls")
             except Exception:
                 pass
-        c, _ = count_web_search_calls(resp)
-        print(f"  [debug] tool-calls: requested={max_tool_calls} response.max_tool_calls={resp_mtc} counted={c}")
+        total_found, details_all = count_web_search_calls(resp)
+        completed = [d for d in (details_all or []) if (d or {}).get("status") == "completed"]
+        billable_count = min(len(completed), int(max_tool_calls or 0))
+        ignored_attempts = max(0, total_found - billable_count)
+        print(
+            f"  [debug] tool-calls: requested={max_tool_calls} response.max_tool_calls={resp_mtc} "
+            f"counted={billable_count} ({ignored_attempts} additional tool call(s) attempted, assumed ignored according to documentation and not counting as billable)"
+        )
     except Exception:
         pass
 
     usage = usage_to_dict(resp)
-    calls, details = count_web_search_calls(resp)
+    # Use previously computed counts; fallback if unavailable
+    if not details_all:
+        total_found, details_all = count_web_search_calls(resp)
+        completed = [d for d in (details_all or []) if (d or {}).get("status") == "completed"]
+        billable_count = min(len(completed), int(max_tool_calls or 0))
+        ignored_attempts = max(0, total_found - billable_count)
     text = extract_text(resp)
     citations = extract_url_citations(resp)
 
@@ -407,23 +425,25 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
                 search_context_size=search_context_size,
                 resp=resp,
                 usage=usage,
-                counted_calls=calls,
-                call_details=details,
+                counted_calls=billable_count,
+                attempted_total=total_found,
+                call_details=details_all,
                 citations=citations,
             )
         except Exception as e:
             print(f"  [debug] failed to serialize response: {e}")
 
     token_cost = compute_token_cost(model, usage)
-    search_cost = web_search_call_cost(model, calls)
+    search_cost = web_search_call_cost(model, billable_count)
     total_cost = round(token_cost + search_cost, 6)
 
     return {
         "model": model,
         "answer": text,
         "usage": usage,
-        "web_search_calls": calls,
-        "web_search_details": details,
+        "web_search_calls": billable_count,
+        "web_search_attempted": total_found,
+        "web_search_details": details_all,
         "citations": citations,
         "token_cost_usd": token_cost,
         "web_search_cost_usd": search_cost,

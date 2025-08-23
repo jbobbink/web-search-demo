@@ -79,8 +79,8 @@ def count_web_search_calls(resp: Any) -> Tuple[int, List[Dict[str, Any]]]:
     This inspects response.output items where item.type == 'web_search_call'.
     Returns (count, details) where details includes the query if present.
     """
-    calls = 0
     details: List[Dict[str, Any]] = []
+    seen_keys = set()
 
     try:
         output = getattr(resp, "output", None)
@@ -89,24 +89,30 @@ def count_web_search_calls(resp: Any) -> Tuple[int, List[Dict[str, Any]]]:
         for item in output:
             item_type = getattr(item, "type", None)
             if item_type == "web_search_call":
-                calls += 1
-                # Try to extract the query
+                # Try to extract unique key and query
+                iid = getattr(item, "id", None)
                 act = getattr(item, "action", None)
                 q = getattr(act, "query", None) if act else None
-                details.append({"type": "web_search_call", "query": q})
+                key = ("web_search_call", iid) if iid else ("web_search_call", (q or "").strip().lower())
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    details.append({"type": "web_search_call", "id": iid, "query": q})
             # Sometimes web search calls might appear as provider_tool_call blocks in adapters,
             # but in raw SDK Responses it should be 'web_search_call'. Keeping just in case:
             if item_type == "provider_tool_call":
                 tool_type = getattr(item, "tool_type", None)
                 if tool_type == "web_search_call":
-                    calls += 1
+                    iid = getattr(item, "id", None)
                     act = getattr(item, "action", None)
                     q = getattr(act, "query", None) if act else None
-                    details.append({"type": "web_search_call", "query": q})
+                    key = ("web_search_call", iid) if iid else ("web_search_call", (q or "").strip().lower())
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        details.append({"type": "web_search_call", "id": iid, "query": q})
     except Exception:
         pass
 
-    return calls, details
+    return len(details), details
 
 
 def extract_text(resp: Any) -> str:
@@ -280,15 +286,27 @@ def run_query(client: OpenAI, model: str, query: str, max_tool_calls: int, searc
     # Optionally provide a coarse location if desired
     # tools[0]["user_location"] = {"type": "approximate", "country": "US", "city": "Los Angeles", "region": "CA", "timezone": "America/Los_Angeles"}
 
-    # Note: Responses API may ignore unknown top-level hints; we primarily limit via instruction above
     resp = client.responses.create(
         model=model,
         input=[system_msg, user_msg],
         tools=tools,
         max_output_tokens=MAX_OUTPUT_TOKENS,
         max_tool_calls=max_tool_calls,
-        # tool_choice="auto"  # default behavior
     )
+
+    # Safety check: log what the server reports back for usage and any web_search_call items
+    try:
+        debug_summary = {
+            "requested_max_tool_calls": max_tool_calls,
+            "counted_web_search_calls": None,
+            "response_has_usage": bool(getattr(resp, "usage", None)),
+        }
+        # quick parse again here for logging
+        c, _ = count_web_search_calls(resp)
+        debug_summary["counted_web_search_calls"] = c
+        print(f"  [debug] tool-calls: requested={max_tool_calls} counted={c}")
+    except Exception:
+        pass
 
     usage = usage_to_dict(resp)
     calls, details = count_web_search_calls(resp)

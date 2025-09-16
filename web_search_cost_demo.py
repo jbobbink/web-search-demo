@@ -85,6 +85,12 @@ def run_query(client, model: str, query: str, max_tool_calls: int, search_contex
     search_cost = web_search_call_cost(model, getattr(resp, "max_tool_calls", max_tool_calls))
     total_cost = token_cost + search_cost
 
+    # Token breakdown
+    in_tokens = int((usage.get("input_tokens") or 0) or 0)
+    cached = int(((usage.get("input_tokens_details") or {}).get("cached_tokens") or 0) or 0)
+    uncached = max(in_tokens - cached, 0)
+    out_tokens = int((usage.get("output_tokens") or 0) or 0)
+
     return {
         "model": model,
         "answer": text,
@@ -92,6 +98,13 @@ def run_query(client, model: str, query: str, max_tool_calls: int, search_contex
         "token_cost_usd": token_cost,
         "web_search_cost_usd": search_cost,
         "total_cost_usd": round(total_cost, 6),
+        "tokens": {
+            "input_total": in_tokens,
+            "input_cached": cached,
+            "input_uncached": uncached,
+            "output": out_tokens,
+            "total": in_tokens + out_tokens,
+        }
     }
 
 # ---- Streamlit UI ----
@@ -133,14 +146,27 @@ if st.button("Run Comparison"):
                 st.write(f"💰 Web search surcharge: ${r['web_search_cost_usd']:.6f}")
                 st.write(f"💰 **Total estimated cost: ${r['total_cost_usd']:.6f}**")
 
-        # Summary table
-        st.subheader("Summary")
+        # Cost Summary table
+        st.subheader("💰 Cost Summary")
         st.table([
             {
                 "Model": r["model"],
                 "Token Cost ($)": f"{r['token_cost_usd']:.6f}",
                 "Web Cost ($)": f"{r['web_search_cost_usd']:.6f}",
                 "Total ($)": f"{r['total_cost_usd']:.6f}",
+            }
+            for r in results
+        ])
+
+        # Token Breakdown table
+        st.subheader("🔢 Token Counts")
+        st.table([
+            {
+                "Model": r["model"],
+                "Input (Uncached)": r["tokens"]["input_uncached"],
+                "Input (Cached)": r["tokens"]["input_cached"],
+                "Output": r["tokens"]["output"],
+                "Total": r["tokens"]["total"],
             }
             for r in results
         ])

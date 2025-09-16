@@ -1,8 +1,6 @@
 import os
 import json
-from datetime import datetime
 from typing import Any, Dict, List
-
 import streamlit as st
 from openai import OpenAI
 
@@ -100,16 +98,21 @@ def run_query(client, model: str, query: str, max_tool_calls: int, search_contex
 st.set_page_config(page_title="OpenAI Web Search Cost Demo", layout="wide")
 st.title("🔎 OpenAI Web Search Cost Comparison")
 
-if not os.getenv("OPENAI_API_KEY"):
-    st.warning("⚠️ OPENAI_API_KEY is not set in your environment.")
+# API key input
+api_key = st.text_input("Enter your OpenAI API Key", type="password")
+if api_key:
+    client = OpenAI(api_key=api_key)
+else:
+    st.warning("⚠️ Please enter your API key to continue.")
+    st.stop()
 
+# Query & settings
 query = st.text_input("Enter your web query", "Latest news on AI regulation in Europe")
 selected_models = st.multiselect("Choose models", MODEL_OPTIONS, default=["gpt-4.1", "gpt-5-mini"])
 max_tool_calls = st.slider("Max web tool calls", 1, 5, DEFAULT_MAX_TOOL_CALLS)
 search_context_size = st.radio("Search context size", ["low", "medium", "high"], index=0)
 
 if st.button("Run Comparison"):
-    client = OpenAI()
     results = []
     for m in selected_models:
         with st.spinner(f"Running {m}..."):
